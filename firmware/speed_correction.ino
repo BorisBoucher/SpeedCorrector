@@ -14,25 +14,33 @@
   The reader must provide a 5V supply voltage with a forward diode to prevent return of 5V from other 
   reader modules.
 
-  Hypothesis : speed sensor generates 2000 pulse/km, so the expected frequency/period are: 
-    - @5km/h :     2.7  Hz, 360ms
-    - @300km/h : 166.666Hz,   6ms
-    - For 1km/h resolution, we need :
-      - @300km/h : 259km/h => 143.888Hz, 6.94ms, delta period = 0.94ms
-      - => Minimal rez : tick = 0.5ms (500µs)
-      - => Maximal counter @ 5km/s : 720 tick
-    
-    With base frequency of 16Mhz, clock = 0.0625µs => 8000 clock/rez.
-    
-    Selectec divisor : 1024 => rez = 64µs
-    @5km/h : 5625 points
+  Measurement taken on a running 3000GT with GPS at steady speed:
+  ---------------------------------------------------------------
+    - @ 50km/h (GPS) :  35.46Hz
+    - @ 99km/h (GPS) :  72.75Hz
+    - @ 86km/h (GPS) :  62.48Hz
+    - @143km/h (GPS) : 106.6Hz
 
-    16 bits counter ok, up to 4.1s => 0.24Hz => 878pt/hour=> 0.4km/h
+  From this data, we can deduce the following:
+    - Average pulse per km/h is ~0.73
+    - Pulse per km is ~2683
+
+  Input capture pre-scaler:
+  -------------------------
+  We expect a rezolution at least of 1 km/h @300km/h, this lead to the followoing :
+    - @300km/h, F=219Hz, Period = 4.566ms
+    - @299km/h, F=218.27Hz, Period = 4.581ms
+    - delta Period for 1km/h @300km/h is 4.5µs
+    - With a clock frequency of 16MHz, the pre-scaler need to be set to 64. This gives a rezolution of 
+      4µs
+  Maximal measurable period (without overflow) :
+    65536 * 4µs = 262144µs => 3.81Hz => 5.225km/h
+  
   
   Measuring input :
     - The input period is measured by the input capture function available on timer 1
-    - Timer 1 is a 16 bits counter, thus allowing reading from 64µs up to 65535*65µs=4.1s
-    - Timer 1 is configured to divide the CPU frequency by 1024
+    - Timer 1 is a 16 bits counter, thus allowing reading from 64µs up to 65535*4µs=262ms
+    - Timer 1 is configured to divide the CPU frequency by 64
 
  Speed limiter remover:
  ---------------------
@@ -44,8 +52,10 @@
 
 #include <EEPROM.h>
 
-#define TICK_VALUE  ((1/16000000.0) * 1024.0)
-#define PULSE_PER_KM  2000
+#include "snxp.h"
+
+#define TICK_VALUE  ((1/16000000.0) * 64.0)
+#define PULSE_PER_KM  2683
 #define PERIOD_50  ((1.0/((PULSE_PER_KM * 50.0) / 3600.0)) / (TICK_VALUE))
 #define PERIOD_100  ((1.0/((PULSE_PER_KM * 100.0) / 3600.0)) / (TICK_VALUE))
 #define PERIOD_150  ((1.0/((PULSE_PER_KM * 150.0) / 3600.0)) / (TICK_VALUE))
@@ -54,16 +64,17 @@
 #define FREQ_100  (((PULSE_PER_KM * 100.0) / 3600.0))
 #define FREQ_150  (((PULSE_PER_KM * 150.0) / 3600.0))
 
-// Min speed : 5km/h
-#define MIN_SPEED 5 
+// Min speed : 3km/h
+#define MIN_SPEED 3
 #define MIN_FREQ (((PULSE_PER_KM * MIN_SPEED) / 3600.0))
 
 // Timeout : min speed -15%
 #define TIMEOUT_TICK (((1.0/((PULSE_PER_KM * MIN_SPEED * 0.85) / 3600.0)) / (TICK_VALUE)) / 1.0)  
 
 uint16_t  gLastCounter = 0;
-uint16_t  gInputPeriod = 0;
-uint16_t  gOutputPeriod = 0;
+uint32_t  gInputPeriod = 0;
+uint32_t  gOutputPeriod = 0;
+uint16_t  gOutputOverflow = 0;
 uint16_t  gOverflowCounter = 0;
 unsigned long gLastWriteLogTime = 0;
 bool gStopped = true;
@@ -143,7 +154,8 @@ ISR (TIMER1_CAPT_vect)
 
   if (gCaptureLive)
   {
-    gInputPeriod = tc1 - gLastCounter;
+    gInputPeriod = (int32_t)tc1 - (int32_t)gLastCounter;
+    gInputPeriod += int32_t(gOverflowCounter) * 0x10000;
   }
   gOverflowCounter = 0;
   gLastCounter = tc1;
@@ -153,12 +165,16 @@ ISR (TIMER1_CAPT_vect)
   sei();
 }
 
+bool ovf = false;
 // Timer 1 overflow interrupt
 ISR (TIMER1_OVF_vect)
 {
   cli();
   ++gOverflowCounter;
-  
+
+   digitalWrite(12, ovf);
+   ovf = !ovf;
+
   sei();
 }
 
@@ -175,7 +191,7 @@ ISR (TIMER1_COMPA_vect)
     digitalWrite(13, gLastOutput);
 
     // program next event
-    OCR1A = OCR1A + (gOutputPeriod >> 1);
+    OCR1A = OCR1A + gOutputPeriod;
   }
 
   sei();
@@ -186,9 +202,9 @@ void setup()
   // Input Capture setup
   // ICNC1: Enable Input Capture Noise Canceler
   // ICES1: =1 for trigger on rising edge
-  // CS10+CS12: =1 set prescaler to 1024x system clock (F_CPU)
+  // CS10+CS11: =1 set prescaler to 64x system clock (F_CPU)
   TCCR1A = 0;
-  TCCR1B = (1<<ICNC1) | (1<<ICES1) | (1<<CS10) | (1<<CS12);
+  TCCR1B = (1<<ICNC1) | (1<<ICES1) | (1<<CS10) | (1<<CS11);
   TCCR1C = 0;
    
   // initialize to catch Falling Edge
@@ -202,11 +218,12 @@ void setup()
   TIMSK1 = (1<<ICIE1) | (1<<TOIE1);	// enable interupts
 
   // Set up the Input Capture pin, ICP1, Arduino Uno pin 8
-  pinMode(8, INPUT);
-  digitalWrite(8, 0);	// floating may have 60 Hz noise on it.
+  pinMode(8, INPUT_PULLUP);
+  //digitalWrite(8, 0);	// floating may have 60 Hz noise on it.
   //digitalWrite(8, 1); // or enable the pullup
 
   pinMode(13, OUTPUT);
+  pinMode(12, OUTPUT);
 
   // activate output compare match interrupt
   TIMSK1 |= 1<<OCIE1A;
@@ -220,7 +237,7 @@ void setup()
 
   Serial.print("Init info : TICK = ");
   Serial.print(TICK_VALUE*1000*1000);
-  Serial.print(", Timeout Tick = ");
+  Serial.print("µs, Timeout Tick = ");
   Serial.print(TIMEOUT_TICK);
 
   Serial.print(", F50 = ");
@@ -228,8 +245,9 @@ void setup()
   Serial.print("Hz F100 = ");
   Serial.print(FREQ_100);
   Serial.print("Hz F150 = ");
-  Serial.print(PERIOD_150);
-  Serial.println("Hz");
+  Serial.print(FREQ_150);
+  Serial.print("Hz, TIMEOUT=");
+  Serial.println(TIMEOUT_TICK);
 
   Serial.println("Setup done");
 
@@ -282,29 +300,107 @@ int32_t myParseInt(const char*& it, const char* last)
   return ret;
 }
 
+int32_t gLoopPerSec = 0;
+
+enum State
+{
+  OPEN_CER_RAISE,
+  OPEN_CER_LOWER,
+  NORMAL
+};
+
+State gState = OPEN_CER_RAISE;
+
 void loop()
 {
   unsigned long now = millis();
 
+  if (gState == OPEN_CER_RAISE)
+  {
+    double freq = 3 + 280.0 * (now / 1000.0);
+    uint32_t period = 1.0 / freq / TICK_VALUE;
+    cli();
+    gOutputPeriod = period;
+    sei();
+
+    if( gStopped == true)
+    {
+          OCR1A = TCNT1 + (gOutputPeriod >> 1);
+    }
+    gStopped = false;
+    gCaptureLive = true;
+    if (now > 1000)
+    {
+      gState = OPEN_CER_LOWER;
+
+      Serial.print(now);
+      Serial.println(" End RAISE");
+    }
+    return;
+  }
+  else if (gState == OPEN_CER_LOWER)
+  {
+    double freq = 3 + 280.0 * ((1000-(now - 1000)) / 1000.0);
+    uint32_t period = 1.0 / freq / TICK_VALUE;
+    cli();
+    gOutputPeriod = period;
+    sei();
+    if (now > 2000)
+    {
+      gState = NORMAL;
+      gStopped = true;
+      gCaptureLive = false;
+
+      Serial.print(now);
+      Serial.println(" End LOWER");
+    }
+    return;
+  }
+
+  ++gLoopPerSec;
+
   // read input
   cli();
-  uint16_t period = gInputPeriod;
-  uint16_t lastCapture = gLastCounter;
-  uint16_t overFlow = gOverflowCounter; 
-  uint16_t currentPeriod = TCNT1 - lastCapture;
+  uint32_t period = gInputPeriod;
+  uint32_t lastCapture = gLastCounter;
+  uint32_t overFlow = gOverflowCounter; 
+  uint32_t tcnt1 = TCNT1;
+  sei();
+
+  if (tcnt1 < lastCapture and overFlow == 0)
+  {
+    // we read the timer before the overflow interrupt !
+    tcnt1 += 0x10000;
+    Serial.print(now);
+    Serial.println(" ================= ");
+  }
+  uint32_t currentPeriod = int32_t(tcnt1) - int32_t(lastCapture) + overFlow * 0x10000;
 
   // check for stop condition
-  if (not gStopped and currentPeriod > TIMEOUT_TICK)
+  if (not gStopped and currentPeriod > int32_t(TIMEOUT_TICK))
   {
+    cli();
     // input is stalled, stop output
     gOutputPeriod = 0;
     gInputPeriod = 0;
-    digitalWrite(13, false);
-    gLastOutput = false;
+//    digitalWrite(13, false);
+//    gLastOutput = false;
     gStopped = true;
     gCaptureLive = false;
+
+    sei();
+    period = 0;
+
+    Serial.print(now);
+    Serial.print(" STOP detected with perdiod of ");
+    Serial.print(currentPeriod);
+    Serial.print(", last capture = ");
+    Serial.print(lastCapture);
+    Serial.print(", tcnt1 = ");
+    Serial.print(tcnt1);
+    Serial.print(", Overflow = ");
+    Serial.println(overFlow);
   }
-  sei();
 
   // Automatically decrease output freq if no input is seen
   if (not gStopped and period != 0 and currentPeriod > period)
@@ -318,7 +414,7 @@ void loop()
   else
     inFreq = 0.0;
 
-  uint16_t outputPeriod;
+  uint32_t outputPeriod;
   uint8_t index;
   
   // compute output period 
@@ -356,14 +452,24 @@ void loop()
     outputPeriod = 0;
   }
 
+  if (gStopped and outputPeriod != 0)
+  {
+    Serial.print(now);
+    Serial.print(" RESTART with period ");
+    Serial.println(outputPeriod);
+  }
+
   cli();
   // update output period param
-  gOutputPeriod = outputPeriod;
+  gOutputPeriod = outputPeriod >> 1;
   // need to program first timer ?
   if (gStopped and outputPeriod != 0)
   {
     OCR1A = TCNT1 + (outputPeriod >> 1);
     gStopped = false;
+    // and swap output immediately
+    gLastOutput = not gLastOutput;
+    digitalWrite(13, gLastOutput);
   }
   sei();
 
@@ -433,7 +539,7 @@ void loop()
   if (now - gLastWriteLogTime > 1000)
   {
     Serial.print("Speed = ");
-    Serial.print(inFreq * 3600.0f / 2000.0f);
+    Serial.print(inFreq * 3600.0f / 2683.0f);
     Serial.print("km/h ");
     Serial.print("Index : ");
     Serial.print(index);
@@ -445,7 +551,10 @@ void loop()
     Serial.print(inFreq);
     Serial.print("Hz, OutF = ");
     Serial.print(outFreq);
-    Serial.print("Hz\n");
+    Serial.print("Hz, ");
+    Serial.print(gLoopPerSec);
+    Serial.print(" loop/s\n");
+    
 
     for (int i = 0; i<4; ++i)
     {
@@ -459,6 +568,7 @@ void loop()
     Serial.println("");
       
     gLastWriteLogTime = now;
+    gLoopPerSec = 0;
   }
 }
 
