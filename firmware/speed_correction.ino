@@ -404,8 +404,9 @@ void loop()
 
   // Automatically decrease output freq if no input is seen
   if (not gStopped and period != 0 and currentPeriod > period)
-    period = currentPeriod;
-
+  {
+    period = min(0xfff1, currentPeriod);
+  }
   // compute input freq based on input period
   float inFreq;
 
