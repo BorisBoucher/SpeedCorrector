@@ -50,6 +50,12 @@
  
  */
 
+/* Version
+ *  
+ *  0.5 : fixed output burst when the input period is greater than 0xffff
+ *  
+ */
+
 #include <EEPROM.h>
 
 #include "snxp.h"
@@ -71,17 +77,18 @@
 // Timeout : min speed -15%
 #define TIMEOUT_TICK (((1.0/((PULSE_PER_KM * MIN_SPEED * 0.85) / 3600.0)) / (TICK_VALUE)) / 1.0)  
 
-uint16_t  gLastCounter = 0;
-uint32_t  gInputPeriod = 0;
-uint32_t  gOutputPeriod = 0;
-uint16_t  gOutputOverflow = 0;
-uint16_t  gOverflowCounter = 0;
-unsigned long gLastWriteLogTime = 0;
-bool gStopped = true;
-bool gCaptureLive = false;
+volatile uint16_t  gLastCounter = 0;
+volatile uint32_t  gInputPeriod = 0;
+volatile uint32_t  gOutputPeriod = 0;
+volatile uint16_t  gOutputOverflow = 0;
+volatile uint16_t  gOverflowCounter = 0;
+volatile unsigned long gLastWriteLogTime = 0;
+volatile bool gStopped = true;
+volatile bool gCaptureLive = false;
+volatile bool gDisplayCapture = false;
 
 
-bool gLastOutput = false;
+volatile bool gLastOutput = false;
 
 String gInputString;
 bool gStringComplete = false;
@@ -149,40 +156,89 @@ void loadConf()
 // Input capture interrupt routine for Speed input
 ISR (TIMER1_CAPT_vect)
 {
+  uint8_t oldSREG = SREG;
   cli();
   uint16_t tc1 = ICR1;
 
+  // TEST TEST TEST
+//    gLastOutput = not gLastOutput;
+//    digitalWrite(13, gLastOutput);
+//	
+  // TEST TEST TEST
+
+  // invert input capture edge
+  TCCR1B ^= (1<<ICES1);
+	
   if (gCaptureLive)
   {
+    // compute duration between event
     gInputPeriod = (int32_t)tc1 - (int32_t)gLastCounter;
+    // add overflow count
     gInputPeriod += int32_t(gOverflowCounter) * 0x10000;
+    gOverflowCounter = 0;
+    
+    // Overflow interrupt is pending. If we read a timer less than
+    // 0xffff, this mean that we read a timer after the overflow, therefore, we need to 
+    // account for an additional overflow value.
+    if ((TIFR1 & _BV(TOV1)) && (tc1 < 0xffff))
+    {
+      gInputPeriod += 0x10000;
+      // Set overflow to -1 because this overflow has already been accounted for, and once
+      // the overflow interrupt will be triggered, it will add 1, thus leading to a value 
+      // of zero.
+      gOverflowCounter = -1;
+    }
   }
-  gOverflowCounter = 0;
+  else
+  {
+    // capture is not live, reset the overflow counter
+    gOverflowCounter = 0;
+    // Overflow interrupt is pending. If we read a timer less than
+    // 0xffff, this mean that we read a timer after the overflow, therefore, we need to 
+    // account for an additional overflow value.
+    if ((TIFR1 & _BV(TOV0)) && (tc1 < 0xffff))
+    {
+      // Set overflow to -1 because this overflow has already been accounted for, and once
+      // the overflow interrupt will be triggered, it will add 1, thus leading to a value 
+      // of zero.
+      gOverflowCounter = -1;
+    }
+  }
   gLastCounter = tc1;
   gCaptureLive = true;
   ICR1 = 0;
 
-  sei();
+  SREG = oldSREG;
+
+//  Serial.print("Input capture : ");
+//  Serial.println(gInputPeriod);
+
+  gDisplayCapture = true;
 }
 
 bool ovf = false;
 // Timer 1 overflow interrupt
 ISR (TIMER1_OVF_vect)
 {
+  uint8_t oldSREG = SREG;
   cli();
   ++gOverflowCounter;
 
    digitalWrite(12, ovf);
    ovf = !ovf;
 
-  sei();
+  SREG = oldSREG;
+
+//  Serial.print("Overflow ! = ");
+//  Serial.println(gOverflowCounter);
 }
 
 ISR (TIMER1_COMPA_vect)
 {
+  uint8_t oldSREG = SREG;
   cli();
 
-  uint16_t counter = TCNT1;
+//  uint16_t counter = TCNT1;
 
   // check timeout (input freq is too slow)
   if (not gStopped)
@@ -194,7 +250,7 @@ ISR (TIMER1_COMPA_vect)
     OCR1A = OCR1A + gOutputPeriod;
   }
 
-  sei();
+  SREG = oldSREG;
 }
 
 void setup()
@@ -230,7 +286,7 @@ void setup()
 
   gInputString.reserve(50);
 
-  Serial.begin(9600);
+  Serial.begin(57600);
 
   // load saved configuration
   loadConf();
@@ -309,7 +365,28 @@ enum State
   NORMAL
 };
 
-State gState = OPEN_CER_RAISE;
+State gState = NORMAL;
+unsigned int gLastUpdate = 0u;
+
+
+class LockInterrupt
+{
+  uint8_t mOldSreg;
+public:
+  LockInterrupt()
+  {
+    // Save State register
+    mOldSreg = SREG;
+    // Clear interrupt bit
+    cli();
+  }
+
+  ~LockInterrupt()
+  {
+    // Restaure state register
+    SREG = mOldSreg;
+  }
+};
 
 void loop()
 {
@@ -317,12 +394,15 @@ void loop()
 
   if (gState == OPEN_CER_RAISE)
   {
-    double freq = 3 + 280.0 * (now / 1000.0);
+    double freq = 3 + 300.0 * (now / 1000.0);
     uint32_t period = 1.0 / freq / TICK_VALUE;
-    cli();
-    gOutputPeriod = period;
-    sei();
-
+//    uint8_t oldSREG = SREG;
+    {
+      LockInterrupt locker;
+//      cli();
+      gOutputPeriod = period;
+//      SREG = oldSREG;
+    }
     if( gStopped == true)
     {
           OCR1A = TCNT1 + (gOutputPeriod >> 1);
@@ -340,11 +420,12 @@ void loop()
   }
   else if (gState == OPEN_CER_LOWER)
   {
-    double freq = 3 + 280.0 * ((1000-(now - 1000)) / 1000.0);
+    double freq = 3 + 300.0 * ((1000-(now - 1000)) / 1000.0);
     uint32_t period = 1.0 / freq / TICK_VALUE;
+    uint8_t oldSREG = SREG;
     cli();
     gOutputPeriod = period;
-    sei();
+    SREG = oldSREG;
     if (now > 2000)
     {
       gState = NORMAL;
@@ -359,121 +440,163 @@ void loop()
 
   ++gLoopPerSec;
 
-  // read input
-  cli();
-  uint32_t period = gInputPeriod;
-  uint32_t lastCapture = gLastCounter;
-  uint32_t overFlow = gOverflowCounter; 
-  uint32_t tcnt1 = TCNT1;
-  sei();
-
-  if (tcnt1 < lastCapture and overFlow == 0)
-  {
-    // we read the timer before the overflow interrupt !
-    tcnt1 += 0x10000;
-    Serial.print(now);
-    Serial.println(" ================= ");
-  }
-  uint32_t currentPeriod = int32_t(tcnt1) - int32_t(lastCapture) + overFlow * 0x10000;
-
-  // check for stop condition
-  if (not gStopped and currentPeriod > int32_t(TIMEOUT_TICK))
-  {
-    cli();
-    // input is stalled, stop output
-    gOutputPeriod = 0;
-    gInputPeriod = 0;
-//    digitalWrite(13, false);
-//    gLastOutput = false;
-    gStopped = true;
-    gCaptureLive = false;
-
-    sei();
-    period = 0;
-
-    Serial.print(now);
-    Serial.print(" STOP detected with perdiod of ");
-    Serial.print(currentPeriod);
-    Serial.print(", last capture = ");
-    Serial.print(lastCapture);
-    Serial.print(", tcnt1 = ");
-    Serial.print(tcnt1);
-    Serial.print(", Overflow = ");
-    Serial.println(overFlow);
-  }
-
-  // Automatically decrease output freq if no input is seen
-  if (not gStopped and period != 0 and currentPeriod > period)
-  {
-    period = min(0xfff1, currentPeriod);
-  }
-  // compute input freq based on input period
+  uint32_t period;
+  uint32_t lastCapture;
+  uint32_t overFlow; 
+  uint32_t tcnt1;
   float inFreq;
-
-  if (period != 0)
-    inFreq = 1.0 / (period * TICK_VALUE);
-  else
-    inFreq = 0.0;
-
-  uint32_t outputPeriod;
   uint8_t index;
-  
-  // compute output period 
-
-  // select the correction range
-  if (inFreq < gFreqTable[1].inputFreq)
-  {
-    // Input speed is less than 50km/h   
-    index = 1;
-  }
-  else if (inFreq < gFreqTable[2].inputFreq)
-  {
-    index = 2;
-  }
-  else
-  {
-    index = 3;
-  }
-
-  // Once index is determined,  
-  // Compute out freq
+  uint32_t outputPeriod;
   float outFreq = 0.0f;
-  if (period != 0)
-  {
-    float di = gFreqTable[index].inputFreq - gFreqTable[index-1].inputFreq;
-    float doo = gFreqTable[index].outputFreq - gFreqTable[index-1].outputFreq;
-    outFreq = (inFreq - gFreqTable[index-1].inputFreq) / di * doo;
-    outFreq += gFreqTable[index-1].outputFreq;
 
-    // And convert to output period
-    outputPeriod = (1.0 / outFreq) / TICK_VALUE;
-  }
-  else
-  {
-    outputPeriod = 0;
-  }
 
-  if (gStopped and outputPeriod != 0)
+  // every 1/10th of seconds
+  if (now - gLastUpdate > 100)
   {
-    Serial.print(now);
-    Serial.print(" RESTART with period ");
-    Serial.println(outputPeriod);
+    gLastUpdate = now; 
+    // read input
+    uint8_t oldSREG = SREG;
+    cli();
+    period = gInputPeriod;
+    lastCapture = gLastCounter;
+    overFlow = gOverflowCounter; 
+    tcnt1 = TCNT1;
+  //  bool beforeOverflow = false;
+  //  if ((TIFR1 & _BV(TOV1)) && (tcnt1 < 0xffff))
+  //    beforeOverflow = true;
+    SREG = oldSREG;
+  
+  //  uint32_t currentPeriod = int32_t(tcnt1) - int32_t(lastCapture) + overFlow * 0x10000;
+  
+    // check for stop condition
+  //  if (not gStopped and currentPeriod > int32_t(TIMEOUT_TICK))
+    if (overFlow >= 2 or period >= 0x10000)
+    {
+      uint8_t oldSREG = SREG;
+      cli();
+      // input is stalled, stop output
+      gOutputPeriod = 0;
+      gInputPeriod = 0;
+  //    digitalWrite(13, false);
+  //    gLastOutput = false;
+      gStopped = true;
+      gCaptureLive = false;
+  
+      SREG = oldSREG;
+      period = 0;
+  
+      Serial.print(now);
+      Serial.print(" STOP detected with period of ");
+      Serial.print(period);
+      Serial.print(", last capture = ");
+      Serial.print(lastCapture);
+      Serial.print(", tcnt1 = ");
+      Serial.print(tcnt1);
+      Serial.print(", Overflow = ");
+      Serial.println(overFlow);
+    }
+  
+    uint32_t baseInputPeriod = period;
+  
+  //  // Automatically decrease output freq if no input is seen
+  //  if (not gStopped and period != 0 and currentPeriod > period)
+  //  {
+  //    period = min(0xfff1, currentPeriod);
+  //  }
+    // compute input freq based on input period
+  
+    if (period != 0)
+      inFreq = 1.0 / (period * 2 * TICK_VALUE);
+    else
+      inFreq = 0.0;
+  
+    // compute output period 
+  
+    // select the correction range
+    if (inFreq < gFreqTable[1].inputFreq)
+    {
+      // Input speed is less than 50km/h   
+      index = 1;
+    }
+    else if (inFreq < gFreqTable[2].inputFreq)
+    {
+      index = 2;
+    }
+    else
+    {
+      index = 3;
+    }
+  
+    // Once index is determined,  
+    // Compute out freq
+    if (period != 0)
+    {
+      float di = gFreqTable[index].inputFreq - gFreqTable[index-1].inputFreq;
+      float doo = gFreqTable[index].outputFreq - gFreqTable[index-1].outputFreq;
+      outFreq = (inFreq - gFreqTable[index-1].inputFreq) / di * doo;
+      outFreq += gFreqTable[index-1].outputFreq;
+  
+      // And convert to output period
+      outputPeriod = (1.0 / outFreq) / TICK_VALUE;
+    }
+    else
+    {
+      outputPeriod = 0;
+    }
+  
+    // clamp output period to 0xffff
+  //  if (outputPeriod > 0x1ffff)
+  //  {
+  //    outputPeriod = 0x1ffff;
+  //    Serial.println("**** MAXED ****");
+  //  }
+  
+  //  if (gStopped and outputPeriod != 0)
+  //  {
+  //    Serial.print(now);
+  //    Serial.print(" RESTART with period ");
+  //    Serial.println(outputPeriod);
+  //  }
+  
+    uint32_t previousOutputPeriod;
+    oldSREG = SREG;
+    cli();
+    // update output period param
+    previousOutputPeriod = gOutputPeriod;
+    gOutputPeriod = outputPeriod >> 1;
+    // need to program first timer ?
+    if (gStopped and outputPeriod != 0)
+    {
+      OCR1A = TCNT1 + (outputPeriod >> 1);
+      gStopped = false;
+      // and swap output immediatel
+  	// TEST : COMMENTED
+  		//gLastOutput = not gLastOutput;
+  		//digitalWrite(13, gLastOutput);
+  	// TEST : COMMENTED
+    }
+    SREG = oldSREG;
+  
+//    if (gDisplayCapture)
+//    {
+//      Serial.print(100000.0/period);
+//      Serial.print(", ");
+//      Serial.println(100000.0/outputPeriod);
+//      gDisplayCapture = false;
+//    }
+  
+    if (previousOutputPeriod != (outputPeriod >> 1) and false)
+    {
+      Serial.print("Output changed from ");
+      Serial.print(previousOutputPeriod<<1);
+      Serial.print(" to ");
+      Serial.print(outputPeriod);
+      Serial.print(", base input = ");
+      Serial.print(baseInputPeriod);
+      Serial.print(", input = ");
+      Serial.println(period);
+    }
   }
-
-  cli();
-  // update output period param
-  gOutputPeriod = outputPeriod >> 1;
-  // need to program first timer ?
-  if (gStopped and outputPeriod != 0)
-  {
-    OCR1A = TCNT1 + (outputPeriod >> 1);
-    gStopped = false;
-    // and swap output immediately
-    gLastOutput = not gLastOutput;
-    digitalWrite(13, gLastOutput);
-  }
-  sei();
-
   // process input command
   if (gStringComplete)
   {
@@ -537,8 +660,17 @@ void loop()
   }
   
   // debug output
-  if (now - gLastWriteLogTime > 1000)
+  if (now - gLastWriteLogTime > 1000 and false)
   {
+    Serial.print("Period=");
+    Serial.print(period);
+    Serial.print(", last capture = ");
+    Serial.print(lastCapture);
+    Serial.print(", tcnt1 = ");
+    Serial.print(tcnt1);
+    Serial.print(", Overflow = ");
+    Serial.println(overFlow);
+    
     Serial.print("Speed = ");
     Serial.print(inFreq * 3600.0f / 2683.0f);
     Serial.print("km/h ");
