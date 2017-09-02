@@ -31,10 +31,14 @@
     - @300km/h, F=219Hz, Period = 4.566ms
     - @299km/h, F=218.27Hz, Period = 4.581ms
     - delta Period for 1km/h @300km/h is 4.5µs
-    - With a clock frequency of 16MHz, the pre-scaler need to be set to 64. This gives a rezolution of 
+    - With a clock frequency of 16MHz, the pre-scaler need to be set to 64. This gives a resolution of 
       4µs
+      (1 cycle @16Mhz is 62ns)
   Maximal measurable period (without overflow) :
     65536 * 4µs = 262144µs => 3.81Hz => 5.225km/h
+
+  If measuring half periods : 
+    3.81Hz/2 =>   1.905Hz => 2.55km/h
   
   
   Measuring input :
@@ -52,6 +56,7 @@
 
 /* Version
  *  
+ *  0.6 : Added lowpass input filter to reduce effect of outlier input value when comming to a stop.
  *  0.5 : fixed output burst when the input period is greater than 0xffff
  *  
  */
@@ -86,10 +91,10 @@ volatile unsigned long gLastWriteLogTime = 0;
 volatile bool gStopped = true;
 volatile bool gCaptureLive = false;
 volatile bool gDisplayCapture = false;
-
-
 volatile bool gLastOutput = false;
 
+
+float gLastInputFreq = 0.0;
 String gInputString;
 bool gStringComplete = false;
 
@@ -154,6 +159,7 @@ void loadConf()
 }
 
 // Input capture interrupt routine for Speed input
+// Input capture side is inverted each time to capture both raising and falling edge.
 ISR (TIMER1_CAPT_vect)
 {
   uint8_t oldSREG = SREG;
@@ -203,6 +209,10 @@ ISR (TIMER1_CAPT_vect)
       // of zero.
       gOverflowCounter = -1;
     }
+
+    // immediately swap the output
+    gLastOutput = not gLastOutput;
+    digitalWrite(13, gLastOutput);
   }
   gLastCounter = tc1;
   gCaptureLive = true;
@@ -510,6 +520,24 @@ void loop()
     else
       inFreq = 0.0;
   
+	// Filter input freq to reject outlier
+	// 0..100km/h in 3s => 0->33km/h /s => delta=24Hz/s=> 2.4Hz per update
+	// => For filtering, we accept only a variation of 10Hz per update
+	
+	const float MAX_VAR_PER_CYCLE = 2.5f;
+	float deltaFreq = inFreq - gLastInputFreq;
+	if (fabs(deltaFreq) > MAX_VAR_PER_CYCLE)
+	{
+		// input freq variation if too high ! Limit variation to 10Hz
+		if (deltaFreq > 0.0)
+			inFreq = gLastInputFreq + MAX_VAR_PER_CYCLE;
+		else
+			inFreq = gLastInputFreq - MAX_VAR_PER_CYCLE;
+	}
+	                                            
+	// store last input freq for next loop
+	gLastInputFreq = inFreq;
+  
     // compute output period 
   
     // select the correction range
@@ -526,6 +554,7 @@ void loop()
     {
       index = 3;
     }
+  
   
     // Once index is determined,  
     // Compute out freq
@@ -559,24 +588,27 @@ void loop()
   //  }
   
     uint32_t previousOutputPeriod;
-    oldSREG = SREG;
-    cli();
-    // update output period param
-    previousOutputPeriod = gOutputPeriod;
-    gOutputPeriod = outputPeriod >> 1;
-    // need to program first timer ?
-    if (gStopped and outputPeriod != 0)
-    {
-      OCR1A = TCNT1 + (outputPeriod >> 1);
-      gStopped = false;
-      // and swap output immediatel
-  	// TEST : COMMENTED
-  		//gLastOutput = not gLastOutput;
-  		//digitalWrite(13, gLastOutput);
-  	// TEST : COMMENTED
-    }
-    SREG = oldSREG;
-  
+	previousOutputPeriod = gOutputPeriod;
+	{
+		oldSREG = SREG;
+		cli();
+		// update output period param
+		
+		gOutputPeriod = outputPeriod >> 1;
+		// need to program first timer ?
+		if (gStopped and outputPeriod != 0)
+		{
+		  OCR1A = TCNT1 + (outputPeriod >> 1);
+		  gStopped = false;
+		  // and swap output immediatel
+		// TEST : COMMENTED
+			//gLastOutput = not gLastOutput;
+			//digitalWrite(13, gLastOutput);
+		// TEST : COMMENTED
+		}
+		SREG = oldSREG;
+	}
+	
 //    if (gDisplayCapture)
 //    {
 //      Serial.print(100000.0/period);
