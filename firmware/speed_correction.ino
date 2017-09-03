@@ -51,6 +51,21 @@
  In addition to speedometer correction, the correcter also provides a speed limiter remover function.
  The principle is simply to limit the speed input of the ECU to a maximum value configurable in the correcter.
  Once the maximum  
+
+ Configuration commands:
+ -----------------------
+ To configure the tree correction point of the correction curve, send simple command on the
+ serial port :
+
+ To set a correction point, send the following command
+  <INDEX> <INFREQ*1000> <OUTFREQ*1000>
+
+  INDEX is the index of the correction point [1..3]
+  INFREQ*1000 is the input frequency times 1000 (eg. 23.45Hz => 23450)
+  OUTFREQ*1000 is the output frequancy times 1000. 
+
+ Once the curve is configured, send the save command to save the value in the EPROM:
+   SAVE
  
  */
 
@@ -303,16 +318,20 @@ void setup()
 
   Serial.print("Init info : TICK = ");
   Serial.print(TICK_VALUE*1000*1000);
-  Serial.print("µs, Timeout Tick = ");
-  Serial.print(TIMEOUT_TICK);
 
-  Serial.print(", F50 = ");
-  Serial.print(FREQ_50);
-  Serial.print("Hz F100 = ");
-  Serial.print(FREQ_100);
-  Serial.print("Hz F150 = ");
-  Serial.print(FREQ_150);
-  Serial.print("Hz, TIMEOUT=");
+  Serial.print(", Conv table: 1: ");
+  Serial.print(int32_t(gFreqTable[0].inputFreq*1000.0f));
+  Serial.print(" => ");
+  Serial.print(int32_t(gFreqTable[0].outputFreq*1000.0f));
+  Serial.print(", 2: ");
+  Serial.print(int32_t(gFreqTable[1].inputFreq*1000.0f));
+  Serial.print(" => ");
+  Serial.print(int32_t(gFreqTable[1].outputFreq*1000.0f));
+  Serial.print(", 3: ");
+  Serial.print(int32_t(gFreqTable[2].inputFreq*1000.0f));
+  Serial.print(" => ");
+  Serial.print(int32_t(gFreqTable[2].outputFreq*1000.0f));
+  Serial.print(", TimeoutTick : ");
   Serial.println(TIMEOUT_TICK);
 
   Serial.println("Setup done");
@@ -494,16 +513,19 @@ void loop()
   
       SREG = oldSREG;
       period = 0;
-  
-      Serial.print(now);
-      Serial.print(" STOP detected with period of ");
-      Serial.print(period);
-      Serial.print(", last capture = ");
-      Serial.print(lastCapture);
-      Serial.print(", tcnt1 = ");
-      Serial.print(tcnt1);
-      Serial.print(", Overflow = ");
-      Serial.println(overFlow);
+
+      if (false)
+      {
+        Serial.print(now);
+        Serial.print(" STOP detected with period of ");
+        Serial.print(period);
+        Serial.print(", last capture = ");
+        Serial.print(lastCapture);
+        Serial.print(", tcnt1 = ");
+        Serial.print(tcnt1);
+        Serial.print(", Overflow = ");
+        Serial.println(overFlow);
+      }
     }
   
     uint32_t baseInputPeriod = period;
@@ -638,6 +660,7 @@ void loop()
     {
       Serial.println("Saving conf");
       saveConf();
+      Serial.println("Conf saved");
     }
     else
     {
@@ -671,13 +694,13 @@ void loop()
       if (not ok)
         Serial.println("Failed to parse output");
   
-      ok &= index < 4;
+      ok &= index > 0 && index < 4;
   
       if (ok)
       {
         // apply the new value for the correction table
-        gFreqTable[index].inputFreq = inVal;
-        gFreqTable[index].outputFreq = outVal;
+        gFreqTable[index-1].inputFreq = inVal;
+        gFreqTable[index-1].outputFreq = outVal;
   
         Serial.print("Updated value : ");
         Serial.print(index);
