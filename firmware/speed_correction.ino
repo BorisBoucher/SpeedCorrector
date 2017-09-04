@@ -326,7 +326,7 @@ void setup()
   Serial.print(int32_t(gFreqTable[0].inputFreq*1000.0f));
   Serial.print(" => ");
   Serial.print(int32_t(gFreqTable[0].outputFreq*1000.0f));
-  Serial.print(", 2: ");
+  Serial.print(", 1: ");
   Serial.print(int32_t(gFreqTable[1].inputFreq*1000.0f));
   Serial.print(" => ");
   Serial.print(int32_t(gFreqTable[1].outputFreq*1000.0f));
@@ -720,7 +720,7 @@ void loop()
         Serial.println("Failed to parse output");
   
 		// only index 1 to 3 are allowed (index 0 is always 0;0)
-      ok &= index > 0 && index < 4;
+      ok &= index >= 0 && index < 4;
   
       if (ok)
       {
