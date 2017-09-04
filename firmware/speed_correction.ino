@@ -1,5 +1,4 @@
 /*
-
   GTO/3000GT/Stealth Speedometer corrector
  
   Principle of operation :
@@ -70,7 +69,7 @@
  */
 
 /* Version
- *  
+ *  0.7 : Finally reproduced and fixed the random speed generated when running very slow !
  *  0.6 : Added lowpass input filter to reduce effect of outlier input value when comming to a stop.
  *  0.5 : fixed output burst when the input period is greater than 0xffff
  *  
@@ -224,11 +223,15 @@ ISR (TIMER1_CAPT_vect)
       // of zero.
       gOverflowCounter = -1;
     }
+  }
 
+  if (gStopped)
+  {
     // immediately swap the output
     gLastOutput = not gLastOutput;
     digitalWrite(13, gLastOutput);
   }
+  
   gLastCounter = tc1;
   gCaptureLive = true;
   ICR1 = 0;
@@ -319,7 +322,7 @@ void setup()
   Serial.print("Init info : TICK = ");
   Serial.print(TICK_VALUE*1000*1000);
 
-  Serial.print(", Conv table: 1: ");
+  Serial.print(", Conv table: 0: ");
   Serial.print(int32_t(gFreqTable[0].inputFreq*1000.0f));
   Serial.print(" => ");
   Serial.print(int32_t(gFreqTable[0].outputFreq*1000.0f));
@@ -327,10 +330,14 @@ void setup()
   Serial.print(int32_t(gFreqTable[1].inputFreq*1000.0f));
   Serial.print(" => ");
   Serial.print(int32_t(gFreqTable[1].outputFreq*1000.0f));
-  Serial.print(", 3: ");
+  Serial.print(", 2: ");
   Serial.print(int32_t(gFreqTable[2].inputFreq*1000.0f));
   Serial.print(" => ");
   Serial.print(int32_t(gFreqTable[2].outputFreq*1000.0f));
+  Serial.print(", 3: ");
+  Serial.print(int32_t(gFreqTable[3].inputFreq*1000.0f));
+  Serial.print(" => ");
+  Serial.print(int32_t(gFreqTable[3].outputFreq*1000.0f));
   Serial.print(", TimeoutTick : ");
   Serial.println(TIMEOUT_TICK);
 
@@ -546,16 +553,16 @@ void loop()
 	// 0..100km/h in 3s => 0->33km/h /s => delta=24Hz/s=> 2.4Hz per update
 	// => For filtering, we accept only a variation of 10Hz per update
 	
-	const float MAX_VAR_PER_CYCLE = 2.5f;
-	float deltaFreq = inFreq - gLastInputFreq;
-	if (fabs(deltaFreq) > MAX_VAR_PER_CYCLE)
-	{
-		// input freq variation if too high ! Limit variation to 10Hz
-		if (deltaFreq > 0.0)
-			inFreq = gLastInputFreq + MAX_VAR_PER_CYCLE;
-		else
-			inFreq = gLastInputFreq - MAX_VAR_PER_CYCLE;
-	}
+//	const float MAX_VAR_PER_CYCLE = 2.5f;
+//	float deltaFreq = inFreq - gLastInputFreq;
+//	if (fabs(deltaFreq) > MAX_VAR_PER_CYCLE)
+//	{
+//		// input freq variation if too high ! Limit variation to 10Hz
+//		if (deltaFreq > 0.0)
+//			inFreq = gLastInputFreq + MAX_VAR_PER_CYCLE;0
+//		else
+//			inFreq = gLastInputFreq - MAX_VAR_PER_CYCLE;
+//	}
 	                                            
 	// store last input freq for next loop
 	gLastInputFreq = inFreq;
@@ -565,7 +572,7 @@ void loop()
     // select the correction range
     if (inFreq < gFreqTable[1].inputFreq)
     {
-      // Input speed is less than 50km/h   
+      // Input speed is less than second curve point   
       index = 1;
     }
     else if (inFreq < gFreqTable[2].inputFreq)
@@ -586,6 +593,23 @@ void loop()
       float doo = gFreqTable[index].outputFreq - gFreqTable[index-1].outputFreq;
       outFreq = (inFreq - gFreqTable[index-1].inputFreq) / di * doo;
       outFreq += gFreqTable[index-1].outputFreq;
+
+      // Filter output freq to reject outlier
+      // 0..100km/h in 3s => 0->33km/h /s => delta=24Hz/s=> 2.4Hz per update
+      // => For filtering, we accept only a variation of 10Hz per update
+
+//      static float gLastOutputFreq = 0.0f;
+//      const float MAX_VAR_PER_CYCLE = 2.5f;
+//      float deltaFreq = outFreq - gLastOutputFreq;
+//      if (fabs(deltaFreq) > MAX_VAR_PER_CYCLE)
+//      {
+//        // input freq variation if too high ! Limit variation to 10Hz
+//        if (deltaFreq > 0.0)
+//          outFreq = gLastOutputFreq + MAX_VAR_PER_CYCLE;
+//        else
+//          outFreq = gLastOutputFreq - MAX_VAR_PER_CYCLE;
+//      }
+//      gLastOutputFreq = outFreq;
   
       // And convert to output period
       outputPeriod = (1.0 / outFreq) / TICK_VALUE;
@@ -595,12 +619,13 @@ void loop()
       outputPeriod = 0;
     }
   
-    // clamp output period to 0xffff
-  //  if (outputPeriod > 0x1ffff)
-  //  {
-  //    outputPeriod = 0x1ffff;
-  //    Serial.println("**** MAXED ****");
-  //  }
+    // Switch to stop mode if output is greater than 0x1ffff
+    if (outputPeriod > 0x1ffff)
+    {
+      outputPeriod = 0;
+      gStopped = true;
+      Serial.println("**** MAXED ****");
+    }
   
   //  if (gStopped and outputPeriod != 0)
   //  {
@@ -694,13 +719,14 @@ void loop()
       if (not ok)
         Serial.println("Failed to parse output");
   
+		// only index 1 to 3 are allowed (index 0 is always 0;0)
       ok &= index > 0 && index < 4;
   
       if (ok)
       {
         // apply the new value for the correction table
-        gFreqTable[index-1].inputFreq = inVal;
-        gFreqTable[index-1].outputFreq = outVal;
+        gFreqTable[index].inputFreq = inVal;
+        gFreqTable[index].outputFreq = outVal;
   
         Serial.print("Updated value : ");
         Serial.print(index);
