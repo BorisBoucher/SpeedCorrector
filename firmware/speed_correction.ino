@@ -42,14 +42,14 @@
   
   Measuring input :
     - The input period is measured by the input capture function available on timer 1
-    - Timer 1 is a 16 bits counter, thus allowing reading from 64µs up to 65535*4µs=262ms
+    - Timer 1 is a 16 bits counter, thus allowing reading from 4µs up to 65535*4µs=262ms
     - Timer 1 is configured to divide the CPU frequency by 64
 
  Speed limiter remover:
  ---------------------
  In addition to speedometer correction, the correcter also provides a speed limiter remover function.
  The principle is simply to limit the speed input of the ECU to a maximum value configurable in the correcter.
- Once the maximum  
+ TODO
 
  Configuration commands:
  -----------------------
@@ -61,7 +61,7 @@
 
   INDEX is the index of the correction point [1..3]
   INFREQ*1000 is the input frequency times 1000 (eg. 23.45Hz => 23450)
-  OUTFREQ*1000 is the output frequancy times 1000. 
+  OUTFREQ*1000 is the output frequency times 1000. 
 
  Once the curve is configured, send the save command to save the value in the EPROM:
    SAVE
@@ -126,7 +126,7 @@ struct CorrectionFreq
 
 // Speed correction table
 // Each entry correspond to a point on the frequency correction curve
-// First iten is always 0 => 0 to define the base of the curve.
+// First item is always 0 => 0 to define the base of the curve.
 CorrectionFreq gFreqTable[] = 
 {
   {0.0, 0.0},
@@ -603,7 +603,7 @@ void loop()
 //      float deltaFreq = outFreq - gLastOutputFreq;
 //      if (fabs(deltaFreq) > MAX_VAR_PER_CYCLE)
 //      {
-//        // input freq variation if too high ! Limit variation to 10Hz
+//        // input freq variation is too high ! Limit variation to 10Hz
 //        if (deltaFreq > 0.0)
 //          outFreq = gLastOutputFreq + MAX_VAR_PER_CYCLE;
 //        else
@@ -785,4 +785,3 @@ void loop()
     gLoopPerSec = 0;
   }
 }
-
