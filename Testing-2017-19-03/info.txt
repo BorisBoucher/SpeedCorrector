@@ -1,0 +1,9 @@
+Test <=6 : in/out 5V
+
+Test 7 > Out on transistor
+
+Test 11 : In on native
+
+Test 12 : In on Nano, no filtering cap
+
+Test 15 : Regulator voltage

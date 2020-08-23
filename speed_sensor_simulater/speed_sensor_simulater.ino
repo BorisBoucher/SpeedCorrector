@@ -4,6 +4,8 @@
   This skech allow the generation of a variable frequency square wave.
   
   Two input pins are used to drive the frequency up or down.
+
+  Tested on Arduino Nano.
   
 */
 
